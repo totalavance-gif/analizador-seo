@@ -11,6 +11,15 @@ MAX_BYTES = 2_000_000
 TIMEOUT = 15
 
 
+@app.after_request
+def add_cors_headers(response):
+    """Keep the API usable from the hosted frontend and for preflight requests."""
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
+
+
 def clean(value):
     return re.sub(r"\s+", " ", value or "").strip()
 
@@ -35,9 +44,13 @@ def audit(url):
         stream=True,
         headers={"User-Agent": "AnalizadorSEO/1.0"},
     )
-    response.raise_for_status()
-    content = response.raw.read(MAX_BYTES + 1, decode_content=True)[:MAX_BYTES]
-    html = content.decode(response.encoding or "utf-8", errors="replace")
+    try:
+        response.raise_for_status()
+        content = response.raw.read(MAX_BYTES + 1, decode_content=True)
+    finally:
+        response.close()
+
+    html = content[:MAX_BYTES].decode(response.encoding or "utf-8", errors="replace")
     soup = BeautifulSoup(html, "lxml")
     final_url = response.url
     issues = []
@@ -59,10 +72,13 @@ def audit(url):
     word_count = len(text.split())
     canonical = soup.find("link", rel=lambda value: value and "canonical" in value)
     lang = soup.html.get("lang") if soup.html else None
-    viewport = soup.find("meta", attrs={"name": "viewport"})
+    viewport = soup.find("meta", attrs={"name": re.compile("^viewport$", re.I)})
     links = soup.find_all("a", href=True)
     final_host = urlparse(final_url).netloc
-    external_links = sum(urlparse(urljoin(final_url, link["href"])).netloc not in ("", final_host) for link in links)
+    external_links = sum(
+        urlparse(urljoin(final_url, link["href"])).netloc not in ("", final_host)
+        for link in links
+    )
 
     seo_checks = [
         ("Título", score_range(len(title), 30, 60), 1.5),
@@ -104,24 +120,49 @@ def audit(url):
         add_issue("Rendimiento", "medium", f"Hay {scripts} scripts externos.", "Reduce scripts y usa carga diferida.")
     if stylesheets > 4:
         add_issue("Rendimiento", "low", f"Hay {stylesheets} hojas CSS.", "Combina y minimiza CSS.")
+    if len(images) > 20:
+        add_issue("Rendimiento", "low", f"Hay {len(images)} imágenes.", "Optimiza imágenes y usa formatos modernos y lazy loading.")
 
-    security_headers = ["Content-Security-Policy", "X-Frame-Options", "X-Content-Type-Options", "Referrer-Policy", "Strict-Transport-Security"]
+    security_headers = [
+        "Content-Security-Policy",
+        "X-Frame-Options",
+        "X-Content-Type-Options",
+        "Referrer-Policy",
+        "Strict-Transport-Security",
+    ]
     missing_headers = [header for header in security_headers if not response.headers.get(header)]
-    security_checks = [("HTTPS", 100 if final_url.startswith("https://") else 0, 1.5), ("Cabeceras", 100 - len(missing_headers) / len(security_headers) * 100, 1)]
+    security_checks = [
+        ("HTTPS", 100 if final_url.startswith("https://") else 0, 1.5),
+        ("Cabeceras", 100 - len(missing_headers) / len(security_headers) * 100, 1),
+    ]
     if not final_url.startswith("https://"):
         add_issue("Seguridad", "critical", "La página no utiliza HTTPS.", "Activa HTTPS y redirige HTTP a HTTPS.")
     if missing_headers:
         add_issue("Seguridad", "low", "Faltan cabeceras de seguridad.", "Revisa: " + ", ".join(missing_headers) + ".")
 
-    content_checks = [("Volumen", min(100, word_count / 400 * 100), 1), ("Estructura", 100 if soup.find_all(["h2", "h3"]) else 50, 1)]
+    content_checks = [
+        ("Volumen", min(100, word_count / 400 * 100), 1),
+        ("Estructura", 100 if soup.find_all(["h2", "h3"]) else 50, 1),
+    ]
     if word_count < 300:
         add_issue("Contenido", "medium", f"El contenido tiene solo {word_count} palabras.", "Amplía el contenido con información útil.")
 
     categories = {}
-    for name, checks, weight in [("SEO", seo_checks, 30), ("Accesibilidad", accessibility_checks, 20), ("Rendimiento", performance_checks, 20), ("Seguridad", security_checks, 15), ("Contenido", content_checks, 10)]:
+    category_definitions = [
+        ("SEO", seo_checks, 30),
+        ("Accesibilidad", accessibility_checks, 20),
+        ("Rendimiento", performance_checks, 20),
+        ("Seguridad", security_checks, 15),
+        ("Contenido", content_checks, 10),
+    ]
+    for name, checks, weight in category_definitions:
         denominator = sum(item[2] for item in checks)
         category_score = round(sum(item[1] * item[2] for item in checks) / denominator, 1)
-        categories[name] = {"weight": weight, "score": category_score, "checks": [{"name": item[0], "score": round(item[1], 1)} for item in checks]}
+        categories[name] = {
+            "weight": weight,
+            "score": category_score,
+            "checks": [{"name": item[0], "score": round(item[1], 1)} for item in checks],
+        }
 
     total_weight = sum(item["weight"] for item in categories.values())
     overall = round(sum(item["score"] * item["weight"] for item in categories.values()) / total_weight, 1)
@@ -130,7 +171,26 @@ def audit(url):
     issues.sort(key=lambda item: severity_order[item["severity"]])
     deduped = list({(item["category"], item["message"]): item for item in recommendations}.values())
 
-    return {"url": url, "final_url": final_url, "status_code": response.status_code, "overall_score": overall, "grade": grade, "categories": categories, "metrics": {"title": title, "description": description, "word_count": word_count, "h1_count": h1_count, "images": len(images), "missing_alt": missing_alt, "links": len(links), "external_links": external_links}, "issues": issues, "recommendations": deduped}
+    return {
+        "url": url,
+        "final_url": final_url,
+        "status_code": response.status_code,
+        "overall_score": overall,
+        "grade": grade,
+        "categories": categories,
+        "metrics": {
+            "title": title,
+            "description": description,
+            "word_count": word_count,
+            "h1_count": h1_count,
+            "images": len(images),
+            "missing_alt": missing_alt,
+            "links": len(links),
+            "external_links": external_links,
+        },
+        "issues": issues,
+        "recommendations": deduped,
+    }
 
 
 @app.route("/api/analyze", methods=["GET", "POST", "OPTIONS"])
@@ -138,7 +198,10 @@ def analyze_route():
     if request.method == "OPTIONS":
         return ("", 204)
     if request.method == "GET":
-        return jsonify({"service": "analizador-seo", "usage": "POST /api/analyze con {url: https://example.com}"})
+        return jsonify({
+            "service": "analizador-seo",
+            "usage": "POST /api/analyze con {url: https://example.com}",
+        })
     try:
         data = request.get_json(silent=True) or {}
         url = str(data.get("url", "")).strip()
