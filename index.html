@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Analizador SEO</title>
+  <style>body{font-family:system-ui,sans-serif;max-width:760px;margin:4rem auto;padding:0 1rem;color:#172033}input,button{font:inherit;padding:.75rem}input{width:70%}button{cursor:pointer}pre{white-space:pre-wrap;background:#f3f5f7;padding:1rem;border-radius:8px}</style>
+</head>
+<body>
+  <h1>Analizador SEO</h1>
+  <p>Auditoría heurística ponderada de una página web.</p>
+  <form id="form"><input id="url" type="url" placeholder="https://example.com" required><button>Analizar</button></form>
+  <pre id="result">Introduce una URL para comenzar.</pre>
+  <script>
+    const form = document.querySelector('#form');
+    const result = document.querySelector('#result');
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault(); result.textContent = 'Analizando...';
+      try {
+        const response = await fetch('/api/analyze', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:document.querySelector('#url').value})});
+        const data = await response.json(); result.textContent = JSON.stringify(data, null, 2);
+      } catch (error) { result.textContent = `Error: ${error.message}`; }
+    });
+  </script>
+</body>
+</html>
